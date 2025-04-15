@@ -8,4 +8,6 @@ api = KaggleApi()
 api.authenticate()
 
 # dataset-ul pe care îl vrei:
-api.dataset_download_files('adilshamim8/student-performance-and-learning-style', path='datasets', unzip=True)
+api.dataset_download_files('mahmoudelhemaly/students-grading-dataset', path='datasets', unzip=True)
+
+# https://www.kaggle.com/datasets/mahmoudelhemaly/students-grading-dataset

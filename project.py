@@ -1,122 +1,216 @@
+# Toate importurile (la fel)
 import streamlit as st
 import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
+import statsmodels.api as sm
 import plotly.express as px
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder, StandardScaler, MinMaxScaler, RobustScaler
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, roc_auc_score, roc_curve
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.feature_selection import SelectKBest, f_classif
-from scipy.stats import zscore
+
 from impyute.imputation.cs import mice
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, roc_auc_score, roc_curve
+from sklearn.model_selection import train_test_split
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+from scipy.stats import f_oneway
 
-st.set_page_config(page_title="🎓 Student Performance Classifier", layout="wide")
-st.title("🎓 Student Performance Classifier")
-st.write("Upload your student CSV file and explore predictions for final grades.")
+st.set_page_config(page_title="📊 Analiză Performanță Studenți", layout="wide")
+st.title("📚 Analiză Vizuală a Performanței Studenților")
 
-uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+uploaded_file = st.file_uploader("📁 Încarcă fișierul CSV", type="csv")
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file, sep=";")
     df.columns = df.columns.str.strip().str.replace(' ', '_').str.replace('%', 'Perc') \
         .str.replace('(', '').str.replace(')', '').str.replace('/', '_').str.title()
 
-    grade_map = {"A": 95, "B": 85, "C": 75, "D": 65}
-    df["Final_Grade_Numeric"] = df["Final_Grade"].map(grade_map)
+    if "Total_Score" in df.columns:
+        threshold = df["Total_Score"].median()
+        df["Target_Binar"] = (df["Total_Score"] >= threshold).astype(int)
+        st.markdown(f"🎯 Target numeric: `Total_Score` | Target binar: `Target_Binar` (mediana = {threshold:.2f})")
 
-    st.sidebar.title("🔧 Filtrare")
-    if "Gender" in df.columns:
-        gender_filter = st.sidebar.selectbox("Filtru după gen:", ["Toate"] + sorted(df["Gender"].dropna().unique()))
-        if gender_filter != "Toate":
-            df = df[df["Gender"] == gender_filter]
+    # === Sidebar ===
+    with st.sidebar.expander("🧩 Tratare valori lipsă"):
+        missing_value_method = st.radio("Metodă:", 
+            ("fillna - zero or unknown", "fillna - mean or mode", "bfill", "ffill", "interpolate", "mice"))
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📋 Date Brute", "📈 Analiză Univariată", "📊 Corelații & Grupări", "🎯 Vizualizări Avansate"])
+    with st.sidebar.expander("🔤 Codificare categorice"):
+        encode_method = st.radio("Metodă:", ("Fără codificare", "Label Encoding"))
+
+    with st.sidebar.expander("📏 Scalare"):
+        scaler_method = st.radio("Scalare:", ("Fără scalare", "Standard", "MinMax", "Robust"))
+
+    with st.sidebar.expander("🚨 Outlieri"):
+        outlier_method = st.radio("Metodă:", ("Nimic", "Z-Score < 3", "Quantile 1%-99%"))
+        selected_outlier_col = st.selectbox("Coloană numerică:", df.select_dtypes(include=np.number).columns)
+
+    # === Codificare ===
+    if encode_method == "Label Encoding":
+        for col in df.select_dtypes(include='object').columns:
+            df[col] = pd.factorize(df[col])[0]
+
+    if scaler_method != "Fără scalare":
+        scaler = {"Standard": StandardScaler(), "MinMax": MinMaxScaler(), "Robust": RobustScaler()}[scaler_method]
+        df[df.select_dtypes(include=np.number).columns] = scaler.fit_transform(df.select_dtypes(include=np.number))
+
+    if missing_value_method == "fillna - zero or unknown":
+        df = df.fillna(0)
+    elif missing_value_method == "fillna - mean or mode":
+        for col in df.columns:
+            df[col] = df[col].fillna(df[col].mean() if df[col].dtype != "object" else df[col].mode()[0])
+    elif missing_value_method == "bfill":
+        df = df.fillna(method="bfill")
+    elif missing_value_method == "ffill":
+        df = df.fillna(method="ffill").fillna(method="bfill")
+    elif missing_value_method == "interpolate":
+        df = df.interpolate(method="linear", limit_direction="both")
+    elif missing_value_method == "mice":
+        np.float = float
+        numeric_df = df.select_dtypes(include=[np.number])
+        imputed = mice(numeric_df.values)
+        df[numeric_df.columns] = pd.DataFrame(imputed, columns=numeric_df.columns)
+
+    if outlier_method == "Z-Score < 3":
+        z = np.abs((df[selected_outlier_col] - df[selected_outlier_col].mean()) / df[selected_outlier_col].std())
+        df = df[z < 3]
+    elif outlier_method == "Quantile 1%-99%":
+        q1 = df[selected_outlier_col].quantile(0.01)
+        q99 = df[selected_outlier_col].quantile(0.99)
+        df = df[(df[selected_outlier_col] >= q1) & (df[selected_outlier_col] <= q99)]
+
+    df_original = df.copy()
+
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 Date brute", "📊 Clasice", "📈 Interactive", "📉 Modele"])
 
     with tab1:
-        st.subheader("📋 Date brute")
-        if st.checkbox("Afișează primele 10 rânduri din dataset"):
-            st.dataframe(df.head(10))
+        st.dataframe(df.head(100))
+        st.subheader("📌 Valori lipsă")
+        missing_pct = df.isnull().mean() * 100
+        if missing_pct.any():
+            st.table(missing_pct[missing_pct > 0])
+        else:
+            st.success("✅ Fără valori lipsă.")
+
+        st.subheader("🌡️ Heatmap lipsuri")
+        fig, ax = plt.subplots(figsize=(5, 3))
+        sns.heatmap(df.isnull(), cbar=False, yticklabels=False, cmap="viridis", ax=ax)
+        st.pyplot(fig)
 
     with tab2:
-        st.markdown("## 📌 Analiză univariată - variabile categorice")
-        cat_cols = ["Gender", "Preferred_Learning_Style", "Participation_In_Discussions", 
-                    "Use_Of_Educational_Tech", "Self_Reported_Stress_Level", "Final_Grade"]
-        available_cats = [col for col in cat_cols if col in df.columns]
-        if available_cats:
-            selected_cat = st.selectbox("Alege o variabilă categorică:", available_cats)
-            left, center, right = st.columns([1, 4, 1])
-            with center:
-                fig1, ax1 = plt.subplots(figsize=(8, 4))
-                sns.countplot(data=df, x=selected_cat, order=df[selected_cat].value_counts().index, ax=ax1)
-                plt.xticks(rotation=45)
-                st.pyplot(fig1)
-
-        st.markdown("## 📌 Analiză univariată - variabile numerice")
         num_cols = df.select_dtypes(include=np.number).columns.tolist()
-        if num_cols:
-            selected_num = st.selectbox("Alege o variabilă numerică:", num_cols)
-            left, center, right = st.columns([1, 4, 1])
-            with center:
-                fig2, ax2 = plt.subplots(figsize=(8, 4))
-                sns.histplot(df[selected_num], kde=True, ax=ax2)
-                st.pyplot(fig2)
+        cat_cols = [col for col in df.columns if df[col].dtype == "object" or df[col].nunique() <= 20]
+
+        viz_type = st.radio("🔍 Vizualizare:", ["Categorică", "Numerică", "Corelații", "Medii"], horizontal=True)
+        if viz_type == "Categorică":
+            selected_cat = st.selectbox("Coloană:", cat_cols)
+            fig, ax = plt.subplots(figsize=(5, 3))
+            sns.countplot(data=df, x=selected_cat, ax=ax)
+            st.pyplot(fig)
+        elif viz_type == "Numerică":
+            selected_num = st.selectbox("Coloană:", num_cols)
+            fig, ax = plt.subplots(figsize=(5, 3))
+            sns.histplot(df[selected_num], kde=True, ax=ax)
+            st.pyplot(fig)
+        elif viz_type == "Corelații":
+            fig, ax = plt.subplots(figsize=(6, 4))
+            sns.heatmap(df[num_cols].corr(), annot=True, cmap="coolwarm", ax=ax)
+            st.pyplot(fig)
+        elif viz_type == "Medii":
+            selected_group = st.selectbox("Grupare după:", cat_cols)
+            if selected_group:
+                means = df.groupby(selected_group)["Total_Score"].mean()
+                st.bar_chart(means)
 
     with tab3:
-        st.markdown("## 🔗 Matrice de corelație")
-        if st.checkbox("Afișează matricea de corelație"):
-            fig3, ax3 = plt.subplots(figsize=(10, 6))
-            corr = df[num_cols].corr()
-            sns.heatmap(corr, annot=True, cmap="coolwarm", ax=ax3)
-            st.pyplot(fig3)
+        st.subheader("🎯 Vizualizări interactive")
 
-        st.markdown("## 📊 Media scorurilor finale pe categorii")
-        cat_options = [col for col in df.columns if df[col].dtype == "object" and df[col].nunique() <= 10]
-        if "Final_Grade" in cat_options:
-            cat_options.remove("Final_Grade")
-        selected_group_col = st.selectbox("Alege o variabilă categorică pentru grupare:", cat_options)
-        if selected_group_col and "Final_Grade_Numeric" in df.columns:
-            grouped_means = df.groupby(selected_group_col)["Final_Grade_Numeric"].mean().dropna()
-            if not grouped_means.empty:
-                st.bar_chart(grouped_means)
+        cat_cols = [col for col in df.columns if df[col].dtype == "object" or df[col].nunique() <= 20]
+        plot_cats = [col for col in cat_cols if df[col].nunique() <= 20]
+        selected_plot_cat = st.selectbox("🔽 Alege o coloană categorică:", plot_cats)
+        selected_plot_num = st.selectbox("📈 Alege o coloană numerică:", df.select_dtypes(include=np.number).columns)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("📦 Boxplot + Stripplot")
+            fig, ax = plt.subplots(figsize=(5, 3))
+            sns.boxplot(data=df, x=selected_plot_cat, y=selected_plot_num, ax=ax, palette="Set2")
+            sns.stripplot(data=df, x=selected_plot_cat, y=selected_plot_num, color="black", alpha=0.5, jitter=True, ax=ax)
+            st.pyplot(fig)
+
+        with col2:
+            st.markdown("🎻 Violin plot")
+            fig_violin = px.violin(df, x=selected_plot_cat, y=selected_plot_num, color=selected_plot_cat, box=True, points="all")
+            fig_violin.update_layout(width=500, height=300)
+            st.plotly_chart(fig_violin, use_container_width=False)
+
+        try:
+            groups = [df[df[selected_plot_cat] == val][selected_plot_num] for val in df[selected_plot_cat].dropna().unique()]
+            stat, p = f_oneway(*groups)
+            st.markdown(f"📊 **Test ANOVA:** `F = {stat:.2f}`, `p = {p:.4f}`")
+            if p < 0.05:
+                st.success("✅ Diferențele între grupuri sunt semnificative statistic.")
             else:
-                st.warning("Nu s-au putut calcula mediile.")
+                st.info("ℹ️ Diferențele între grupuri NU sunt semnificative statistic.")
+        except Exception as e:
+            st.warning(f"⚠️ Eroare ANOVA: {e}")
 
     with tab4:
-        st.markdown("## 🎯 Analiză vizuală avansată a scorurilor finale")
-        if cat_options:
-            selected_plot_col = st.selectbox("Alege o variabilă pentru distribuție detaliată:", cat_options, key="dist_col")
-            left, center, right = st.columns([1, 4, 1])
-            with center:
-                st.markdown("### 📦 Boxplot - Distribuția scorurilor finale")
-                fig_box = px.box(df, x=selected_plot_col, y="Final_Grade_Numeric", points="all", color=selected_plot_col, width=700, height=400)
-                st.plotly_chart(fig_box, use_container_width=False)
+        df_model = df_original.copy()
 
-                st.markdown("### 📊 Histogramă suprapusă - Scoruri finale")
-                fig_hist = px.histogram(df, x="Final_Grade_Numeric", color=selected_plot_col, barmode="overlay", opacity=0.6, width=700, height=400)
-                st.plotly_chart(fig_hist, use_container_width=False)
+        st.subheader("📈 Regresie liniară (Total_Score)")
+        reg_cols = st.multiselect("Predictori:", [col for col in df_model.columns if col != "Total_Score"])
+        if reg_cols:
+            X = df_model[reg_cols].select_dtypes(include=[np.number])
+            y = df_model["Total_Score"]
+            X = sm.add_constant(X)
+            if X.shape[1] > 1:
+                model = sm.OLS(y, X).fit()
+                st.text(model.summary())
+            else:
+                st.warning("Alege minim 1 coloană numerică.")
 
-                st.markdown("### 🎻 Violin plot - Formă și variație")
-                fig_violin = px.violin(df, y="Final_Grade_Numeric", x=selected_plot_col, box=True, points="all", color=selected_plot_col, width=700, height=400)
-                st.plotly_chart(fig_violin, use_container_width=False)
+        st.subheader("🔍 Logistic Regression")
+        target = "Target_Binar"
+        feat_cols = st.multiselect("Predictori:", [col for col in df_model.columns if col != target], key="logreg")
+        if feat_cols:
+            X = df_model[feat_cols]
+            y = df_model[target]
+            for col in X.select_dtypes(include=["object", "category"]).columns:
+                X[col] = pd.factorize(X[col])[0]
 
-        st.markdown("## 📊 Comparație între stiluri de învățare pe variabile numerice")
-        important_vars = [
-            "Study_Hours_Per_Week",
-            "Exam_Score_Perc",
-            "Attendance_Rate_Perc",
-            "Self_Reported_Stress_Level"
-        ]
-        available_vars = [col for col in important_vars if col in df.columns]
-        if "Preferred_Learning_Style" in df.columns and available_vars:
-            for var in available_vars:
-                st.markdown(f"### {var.replace('_', ' ')}")
-                left, center, right = st.columns([1, 4, 1])
-                with center:
-                    fig = px.box(df, x="Preferred_Learning_Style", y=var, color="Preferred_Learning_Style", points="all", width=700, height=400)
-                    st.plotly_chart(fig, use_container_width=False)
+            if st.checkbox("🎯 SelectKBest"):
+                selector = SelectKBest(f_regression, k=min(5, X.shape[1]))
+                X_new = selector.fit_transform(X, y)
+                selected = X.columns[selector.get_support()]
+                X = pd.DataFrame(X_new, columns=selected)
+                st.success(f"Selectate: {', '.join(selected)}")
+
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            model = LogisticRegression(max_iter=100, solver="liblinear")
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+
+            st.markdown("📊 Confusion Matrix")
+            fig, ax = plt.subplots(figsize=(5, 3))
+            sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt="d", cmap="Blues", ax=ax)
+            st.pyplot(fig)
+
+            st.markdown("🧾 Classification Report")
+            st.dataframe(pd.DataFrame(classification_report(y_test, y_pred, output_dict=True)).T)
+
+            st.markdown(f"✅ Accuracy: {accuracy_score(y_test, y_pred):.2f}")
+
+            if len(np.unique(y_test)) == 2:
+                probs = model.predict_proba(X_test)[:, 1]
+                fpr, tpr, _ = roc_curve(y_test, probs)
+                auc = roc_auc_score(y_test, probs)
+                fig, ax = plt.subplots(figsize=(5, 3))
+                ax.plot(fpr, tpr, label=f"AUC = {auc:.2f}")
+                ax.plot([0, 1], [0, 1], "--", label="Random")
+                ax.set_title("ROC Curve")
+                ax.legend()
+                st.pyplot(fig)
 
 else:
-    st.info("🔼 Te rog încarcă un fișier CSV cu separator `;`.")
+    st.info("🔼 Încarcă fișierul CSV (cu separator `;`) pentru a începe analiza.")
